@@ -1,0 +1,164 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum SiteStatus {
+  active
+  paused
+}
+
+enum ScanStatus {
+  queued
+  running
+  completed
+  failed
+}
+
+enum Severity {
+  critical
+  serious
+  moderate
+  minor
+}
+
+enum Plan {
+  free
+  pro
+  agency
+}
+
+model User {
+  id             String         @id @default(cuid())
+  email          String         @unique
+  name           String?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  memberships    Member[]
+  organizations  Organization[] @relation("OrgOwner")
+}
+
+model Organization {
+  id            String         @id @default(cuid())
+  name          String
+  ownerId       String
+  owner         User           @relation("OrgOwner", fields: [ownerId], references: [id])
+  members       Member[]
+  sites         Site[]
+  subscriptions Subscription[]
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+}
+
+model Member {
+  id             String       @id @default(cuid())
+  organizationId String
+  userId         String
+  role           String       @default("member")
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  user           User         @relation(fields: [userId], references: [id])
+  createdAt      DateTime     @default(now())
+
+  @@unique([organizationId, userId])
+}
+
+model Site {
+  id             String       @id @default(cuid())
+  organizationId String
+  name           String
+  baseUrl        String
+  platform       String
+  verifyStatus   String       @default("unverified")
+  pageLimit      Int          @default(50)
+  status         SiteStatus   @default(active)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  scans        Scan[]
+}
+
+model Scan {
+  id              String      @id @default(cuid())
+  siteId          String
+  status          ScanStatus  @default(queued)
+  healthScore     Int?
+  criticalCount   Int         @default(0)
+  seriousCount    Int         @default(0)
+  moderateCount   Int         @default(0)
+  minorCount      Int         @default(0)
+  startedAt       DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime    @default(now())
+
+  site      Site       @relation(fields: [siteId], references: [id])
+  pages     ScanPage[]
+  issues    Issue[]
+  jobs      ScanJob[]
+}
+
+model ScanPage {
+  id           String   @id @default(cuid())
+  scanId       String
+  url          String
+  pageType     String?
+  loadMs       Int?
+  issueCount   Int      @default(0)
+  screenshot   String?
+  createdAt    DateTime @default(now())
+
+  scan   Scan    @relation(fields: [scanId], references: [id])
+  issues Issue[]
+}
+
+model ScanJob {
+  id         String     @id @default(cuid())
+  scanId     String
+  status     ScanStatus @default(queued)
+  attempts   Int        @default(0)
+  logs       String?
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  scan Scan @relation(fields: [scanId], references: [id])
+}
+
+model Issue {
+  id          String    @id @default(cuid())
+  scanId       String
+  scanPageId   String
+  ruleId       String
+  severity     Severity
+  selector     String
+  summary      String
+  detail       String
+  fingerprint  String
+  isNew        Boolean   @default(true)
+  resolved     Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+
+  scan     Scan     @relation(fields: [scanId], references: [id])
+  scanPage ScanPage @relation(fields: [scanPageId], references: [id])
+
+  @@index([scanId, severity])
+  @@index([fingerprint])
+}
+
+model Subscription {
+  id                   String   @id @default(cuid())
+  organizationId       String
+  stripeCustomerId     String?  @unique
+  stripeSubscriptionId String?  @unique
+  plan                 Plan     @default(free)
+  status               String   @default("inactive")
+  periodStart          DateTime?
+  periodEnd            DateTime?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+}
