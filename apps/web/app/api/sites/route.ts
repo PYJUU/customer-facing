@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { getRequestOrganizationId } from "@/lib/request-context";
@@ -6,6 +6,11 @@ import { rateLimit } from "@/lib/security/rate-limit";
 import { normalizePublicBaseUrl } from "@/lib/security/url-guard";
 import { getRequestId, logger } from "@/lib/logger";
 import { verifyTurnstileToken } from "@/lib/security/turnstile";
+import {
+  apiError,
+  NoOrganizationError,
+  UnauthenticatedError,
+} from "@/lib/api/errors";
 
 const siteInput = z.object({
   name: z.string().min(1).max(100),
@@ -23,9 +28,11 @@ export async function POST(req: Request) {
       requestId,
       error: "missing DATABASE_URL",
     });
-    return NextResponse.json(
-      { error: "服务暂不可用：缺少 DATABASE_URL", requestId },
-      { status: 503 },
+    return apiError(
+      503,
+      "SERVICE_UNAVAILABLE",
+      "服务暂不可用：缺少 DATABASE_URL",
+      requestId,
     );
   }
 
@@ -34,9 +41,14 @@ export async function POST(req: Request) {
     const limitResult = rateLimit(`site-create:${orgId}`, 20, 60_000);
     if (!limitResult.allowed) {
       logger.warn({ event: "site.create.rate_limited", requestId, orgId });
-      return NextResponse.json(
-        { error: "请求过于频繁，请稍后重试", requestId },
-        { status: 429 },
+      return apiError(
+        429,
+        "RATE_LIMITED",
+        "请求过于频繁，请稍后重试",
+        requestId,
+        {
+          retryAfterMs: limitResult.retryAfterMs,
+        },
       );
     }
 
@@ -45,9 +57,12 @@ export async function POST(req: Request) {
 
     if (!parsed.success) {
       logger.warn({ event: "site.create.invalid_input", requestId, orgId });
-      return NextResponse.json(
-        { error: "参数不合法", issues: parsed.error.flatten(), requestId },
-        { status: 400 },
+      return apiError(
+        400,
+        "VALIDATION_ERROR",
+        "参数不合法",
+        requestId,
+        parsed.error.flatten(),
       );
     }
 
@@ -61,45 +76,16 @@ export async function POST(req: Request) {
         orgId,
         reason: turnstile.reason,
       });
-      return NextResponse.json(
-        { error: "人机验证失败", requestId },
-        { status: 403 },
-      );
+      return apiError(403, "FORBIDDEN", "人机验证失败", requestId);
     }
 
-    const baseUrl = normalizePublicBaseUrl(parsed.data.baseUrl);
-    const organization = await prisma.organization.findUnique({
-      where: { id: orgId },
-    });
-    if (!organization) {
-      logger.warn({ event: "site.create.org_not_found", requestId, orgId });
-      return NextResponse.json(
-        { error: "组织不存在", requestId },
-        { status: 400 },
-      );
-    }
-
-    const existed = await prisma.site.findFirst({
-      where: {
-        organizationId: organization.id,
-        baseUrl,
-      },
-    });
-
-    if (existed) {
-      logger.warn({ event: "site.create.conflict", requestId, orgId, baseUrl });
-      return NextResponse.json(
-        { error: "该站点已存在", requestId },
-        { status: 409 },
-      );
-    }
-
+    const baseUrl = await normalizePublicBaseUrl(parsed.data.baseUrl);
     const site = await prisma.site.create({
       data: {
         name: parsed.data.name,
         baseUrl,
         platform: parsed.data.platform,
-        organizationId: organization.id,
+        organizationId: orgId,
       },
     });
 
@@ -109,20 +95,28 @@ export async function POST(req: Request) {
       orgId,
       siteId: site.id,
     });
-    return NextResponse.json({ ...site, requestId }, { status: 201 });
+    return Response.json({ data: site, requestId }, { status: 201 });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "服务异常";
-    if (message === "UNAUTHENTICATED") {
-      return NextResponse.json({ error: "未登录", requestId }, { status: 401 });
-    }
-    if (message === "NO_ORGANIZATION") {
-      return NextResponse.json(
-        { error: "用户未关联组织", requestId },
-        { status: 403 },
-      );
+    if (error instanceof UnauthenticatedError) {
+      return apiError(401, "UNAUTHENTICATED", "未登录", requestId);
     }
 
-    logger.error({ event: "site.create.failed", requestId, error: message });
-    return NextResponse.json({ error: "服务异常", requestId }, { status: 400 });
+    if (error instanceof NoOrganizationError) {
+      return apiError(403, "NO_ORGANIZATION", "用户未关联组织", requestId);
+    }
+
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2002"
+    ) {
+      return apiError(409, "CONFLICT", "该站点已存在", requestId);
+    }
+
+    logger.error({
+      event: "site.create.failed",
+      requestId,
+      error: String(error),
+    });
+    return apiError(500, "INTERNAL_ERROR", "服务异常", requestId);
   }
 }
