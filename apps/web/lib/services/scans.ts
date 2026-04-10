@@ -7,12 +7,15 @@ export type CreateManualScanResult = {
   status: string;
 };
 
+type PrismaLike = typeof prisma;
+
 export async function createManualScan(
   siteId: string,
   orgId: string,
   requestId: string,
+  db: PrismaLike = prisma,
 ): Promise<CreateManualScanResult> {
-  return prisma.$transaction(
+  return db.$transaction(
     async (tx) => {
       await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${siteId}))`;
 
